@@ -1,1 +1,25 @@
-Question 3: Write a Python function to find the factorial of a number.
+Mission 3 – Fill-in-the-Blank Debugging
+
+Story:
+Phantom sent a partially corrupted script. Some lines are missing — only by filling the blanks correctly will you extract the next key.
+
+Code (Fill in ___):
+```python
+agents = ["red", "blue", "green", "yellow"]
+for a in agents:
+	if len(a) > ___:
+		print(a[___].upper(), end="")
+	else:
+		print(a[___].upper(), end="")
+```
+
+Task:
+Fill in the blanks, run the code, and trace the output. This is the key for Mission 3.
+
+Answer:
+Blanks: 3, 0, -1
+
+Output: RLEG
+
+Spy-Themed Hint:
+"The Phantom sabotaged the log script. Watch the lines carefully — one part checks length, another picks a letter. Fill the blanks correctly, or the code will self-destruct!"

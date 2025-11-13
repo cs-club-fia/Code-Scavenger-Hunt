@@ -39,6 +39,9 @@ ALLOWED_EXTENSIONS = {'py'}
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'fallbacksecretkey')
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+# Ensure submissions and upload directories exist on startup
+os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 login_manager = LoginManager()
 login_manager.init_app(app)
 async_mode = 'threading'
@@ -151,16 +154,11 @@ def login():
 def dashboard():
     if current_user.is_admin:
         return redirect(url_for('admin_dashboard'))
-        
-    # Check if user has started any questions
-    with sqlite3.connect(DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute("SELECT COUNT(*) FROM submissions WHERE username=?", (current_user.id,))
-        has_started = c.fetchone()[0] > 0
-    
-    if not has_started:
+
+    # If the user hasn't started the global test session, show start screen
+    if not qm.has_global_started(current_user.id):
         return render_template('start_test.html', username=current_user.id)
-    
+
     questions = list(qm.timers.keys())
 
     # Build a submitted map so the template can check per-question submission status
@@ -187,11 +185,20 @@ def dashboard():
                          current_question=current_question)
 
 # Add route for start test
-@app.route('/start_test', methods=['GET'])
+@app.route('/start_test', methods=['GET', 'POST'])
 @login_required
 def start_test():
     if current_user.is_admin:
         return redirect(url_for('admin_dashboard'))
+    if request.method == 'POST':
+        # Start the single global timer for this user
+        try:
+            qm.start_global_timer(current_user.id)
+        except Exception:
+            app.logger.exception('Failed to start global timer')
+        # Redirect to first question
+        first_q = list(qm.timers.keys())[0]
+        return redirect(url_for('question', qname=first_q))
     return render_template('start_test.html', username=current_user.id)
 
 # Update review route
@@ -235,9 +242,16 @@ def question():
         return redirect(url_for('dashboard'))
     
     if request.method == 'POST':
+        # Server-side timer enforcement: compute current global time left
+        time_left = qm.get_global_time_left(current_user.id)
+
         # Support auto-submit when timer expires (client may post auto_submit=1)
         if request.form.get('auto_submit') == '1':
             try:
+                # Only allow auto-submit if the server-side timer has expired
+                if time_left > 0:
+                    return ("Timer has not expired yet", 400)
+
                 # If there is no uploaded file, create an empty .py file for this user/question
                 user_dir = os.path.join(SUBMISSIONS_DIR, current_user.id)
                 os.makedirs(user_dir, exist_ok=True)
@@ -246,35 +260,34 @@ def question():
                 if not os.path.exists(dest):
                     with open(dest, 'w', encoding='utf-8') as f:
                         f.write('# auto-submitted empty file\n')
-                # Mark submission in DB (use qm.submit_answer by creating a temporary path)
-                # Create a small temp file path to pass into qm.submit_answer
+                # Save file but do not mark verified; require key verification to proceed
                 temp_path = dest
-                qm.submit_answer(current_user.id, qname, temp_path)
-
-                # Redirect to next question or review
-                questions = list(qm.timers.keys())
-                current_idx = questions.index(qname)
-                next_question = questions[current_idx + 1] if current_idx < len(questions) - 1 else None
-                if next_question:
-                    return redirect(url_for('question', qname=next_question))
-                else:
-                    return redirect(url_for('review'))
-            except Exception as e:
+                qm.save_submission_file(current_user.id, qname, temp_path)
+                # Redirect to key verification page so user must enter the key to complete
+                return redirect(url_for('key_verify', qname=qname))
+            except Exception:
                 log_error(traceback.format_exc())
                 return ("", 500)
 
         # Normal uploaded-file handling
+        # Before accepting an uploaded answer ensure global timer still allows submissions
+        if time_left <= 0:
+            return render_template('question.html', qname=qname,
+                                error='Time has expired. You can no longer submit this question.',
+                                time_left=0,
+                                question_text=qm.get_question_text(qname))
+
         if 'answer' not in request.files:
             return render_template('question.html', qname=qname, 
                                 error='No file uploaded', 
-                                time_left=qm.get_time_left(current_user.id, qname),
+                                time_left=time_left,
                                 question_text=qm.get_question_text(qname))
         
         file = request.files['answer']
         if file.filename == '':
             return render_template('question.html', qname=qname, 
                                 error='No file selected', 
-                                time_left=qm.get_time_left(current_user.id, qname),
+                                time_left=qm.get_global_time_left(current_user.id),
                                 question_text=qm.get_question_text(qname))
         
         if file and allowed_file(file.filename):
@@ -283,17 +296,20 @@ def question():
                 temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
                 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
                 file.save(temp_path)
-                qm.submit_answer(current_user.id, qname, temp_path)
-                
-                # Find next question
-                questions = list(qm.timers.keys())
-                current_idx = questions.index(qname)
-                next_question = questions[current_idx + 1] if current_idx < len(questions) - 1 else None
-                
-                if next_question:
-                    return redirect(url_for('question', qname=next_question))
-                else:
-                    return redirect(url_for('review'))
+                # Final check: ensure time hasn't expired in the small gap while uploading
+                if qm.get_global_time_left(current_user.id) <= 0:
+                    # Clean up uploaded temp file
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                    return render_template('question.html', qname=qname,
+                                        error='Time has expired during upload. Submission rejected.',
+                                        time_left=0,
+                                        question_text=qm.get_question_text(qname))
+                # Save file but don't mark verified yet; require key verification
+                qm.save_submission_file(current_user.id, qname, temp_path)
+                return redirect(url_for('key_verify', qname=qname))
                     
             except Exception as e:
                 error = str(e)
@@ -304,10 +320,19 @@ def question():
                                     question_text=qm.get_question_text(qname))
     
     # GET request handling
+    # Ensure a server-side timer exists for this user/question. This will only
+    # create a start_time if one does not already exist (or is NULL). Calling
+    # this here makes the timer persistent across page reloads.
+    try:
+        qm.start_timer(current_user.id, qname)
+    except Exception:
+        # Don't block the user if there's a DB hiccup; logging will capture it.
+        app.logger.exception('Failed to start timer')
+
     if not qm.can_access(current_user.id, qname):
         return redirect(url_for('review'))
-        
-    return render_template('question.html', 
+
+    return render_template('question.html',
                          qname=qname,
                          time_left=qm.get_time_left(current_user.id, qname),
                          question_text=qm.get_question_text(qname))
@@ -365,6 +390,44 @@ def admin_dashboard():
                          errors=errors,
                          success_message=success_message,
                          leave_counts=leave_counts)
+
+
+@app.route('/key-verify', methods=['GET', 'POST'])
+@login_required
+def key_verify():
+    if current_user.is_admin:
+        return redirect(url_for('admin_dashboard'))
+
+    qname = request.values.get('qname')
+    if not qname:
+        return redirect(url_for('dashboard'))
+
+    # time left from global timer
+    time_left = qm.get_global_time_left(current_user.id)
+
+    if request.method == 'POST':
+        key = request.form.get('key', '').strip()
+        if not key:
+            return render_template('key_verify.html', qname=qname, error='Please enter a key', time_left=time_left)
+
+        try:
+            if qm.verify_key(qname, key):
+                # Mark submission as verified (complete) and move to next
+                qm.mark_submission_verified(current_user.id, qname)
+                questions = list(qm.timers.keys())
+                current_idx = questions.index(qname)
+                next_question = questions[current_idx + 1] if current_idx < len(questions) - 1 else None
+                if next_question:
+                    return redirect(url_for('question', qname=next_question))
+                else:
+                    return redirect(url_for('review'))
+            else:
+                return render_template('key_verify.html', qname=qname, error='Incorrect key. Try again.', time_left=time_left)
+        except Exception:
+            log_error(traceback.format_exc())
+            return render_template('key_verify.html', qname=qname, error='Verification failed. Try again later.', time_left=time_left)
+
+    return render_template('key_verify.html', qname=qname, time_left=time_left)
 
 
 @app.route('/admin/stats')

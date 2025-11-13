@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="glass">
+    <div class="header">Key Verification — {{ qname|capitalize }}</div>
+    {% if error %}
+      <div class="status" style="color:#e74c3c;">{{ error }}</div>
+    {% endif %}
+    <div class="status">Enter the mission key to unlock the next challenge.</div>
+    <form method="post" action="/key-verify">
+        <input type="hidden" name="qname" value="{{ qname }}">
+        <input type="text" name="key" placeholder="Enter key here" required style="padding:8px;width:80%;margin:8px 0;">
+        <div>
+            <button type="submit" style="background:#27ae60;color:#fff;padding:8px 16px;border:none;border-radius:6px;">Verify Key</button>
+            <a href="/question?qname={{ qname }}" style="margin-left:12px;">Back to question</a>
+        </div>
+    </form>
+    <div style="margin-top:16px;">
+        <small>Time left: <strong>{{ time_left }}</strong> seconds</small>
+    </div>
+</div>
+{% endblock %}

@@ -1,1 +1,37 @@
-Question 4: Write a Python function to sort a list of integers.
+Mission 4 – The Nested Labyrinth
+
+Story:
+Phantom left scrambled codes in a digital labyrinth. Only by analyzing nested loops, conditionals, and slicing can you extract the hidden message.
+
+Code:
+```python
+codes = ["alpha", "beta", "gamma", "delta"]
+hidden = []
+
+for i, c in enumerate(codes):
+	for j in range(len(c)):
+		if j % 2 == 0:
+			hidden.append(c[j].upper())
+		else:
+			hidden.append(str(j))
+		if j == len(c) - 1:
+			hidden.append("-")
+
+message = hidden[::3]
+print("".join(message))
+```
+
+Task:
+Trace the nested loops, track what goes into `hidden`, apply slicing `[::3]`, and determine the output. This is the key for Mission 4.
+
+Spy-Themed Syntax Hints:
+enumerate(codes) → Gives both the index and the agent code, like reading a dossier with file numbers.
+
+if j % 2 == 0 → Even positions hide keys; odd ones are traps.
+
+append() → Add each discovered clue to your encrypted notebook.
+
+hidden[::3] → Every third element hides a secret — skip the decoys.
+
+Spy-Themed Hint:
+"This labyrinth is deceptive. Some letters are shadows, some numbers are decoys. Only the pattern of every third element reveals the true message. Remember, even indices hide secrets."

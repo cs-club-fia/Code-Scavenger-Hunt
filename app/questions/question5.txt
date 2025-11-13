@@ -1,1 +1,34 @@
-Question 5: Write a Python function to find the largest element in a list.
+Mission 5 – The Final Cipher
+
+Story:
+Agent 401, you now have all four keys: 721, AETDL, RLEG, and the hidden message from Mission 4. The Phantom scrambled his final identity across them. Only by combining these keys using complex Python operations can you reveal the criminal’s true name.
+
+Code:
+```python
+keys = ["721", "AETDL", "RLEG", "A0L1P2H3A0-B0E1T2A0-G0A1M2M3A0-D0E1L2T3A0"]
+
+final = "".join([
+	keys[0][-1],
+	*[c for c in keys[1] if keys[1].index(c) % 2 == 0],
+	keys[2][:2],
+	*keys[3][::2]
+])
+print(final)
+```
+
+Task:
+Trace each operation carefully and combine pieces to uncover the Phantom’s identity.
+
+Answer (example): RISHAN IYER
+
+Spy-Themed Syntax Hints:
+* → Extract each small intel piece from the safehouse and spread it into the final dossier.
+
+[c for c in keys[1] if keys[1].index(c) % 2 == 0] → Collect only letters from even-numbered positions; the rest are decoys.
+
+keys[3][::2] → Pick every second character from the fourth safehouse.
+
+''.join(...) → Assemble all collected fragments into a single coherent identity report.
+
+Spy-Themed Hint:
+"The Phantom scattered their identity across all your previous keys. Look at the edges, skip the decoys, and collect only what’s meaningful. Every character matters."
