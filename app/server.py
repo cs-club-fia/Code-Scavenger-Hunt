@@ -33,15 +33,11 @@ SUBMISSIONS_DIR = os.path.join(os.path.dirname(__file__), 'submissions')
 LOGINS_PATH = os.path.join(os.path.dirname(__file__), 'logins.json')
 SSL_CERT = os.path.join(os.path.dirname(__file__), 'cert.pem')
 SSL_KEY = os.path.join(os.path.dirname(__file__), 'key.pem')
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
-ALLOWED_EXTENSIONS = {'py'}
 
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'fallbacksecretkey')
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-# Ensure submissions and upload directories exist on startup
+# Ensure submissions directory exists on startup (DB-backed progress only)
 os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 login_manager = LoginManager()
 login_manager.init_app(app)
 async_mode = 'threading'
@@ -122,7 +118,8 @@ def load_user(user_id):
 
 # --- Helpers ---
 def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    # File uploads are deprecated in this event; keep helper for compatibility
+    return False
 
 def log_error(msg):
     errors.append(msg)
@@ -154,9 +151,8 @@ def login():
 def dashboard():
     if current_user.is_admin:
         return redirect(url_for('admin_dashboard'))
-
-    # If the user hasn't started the global test session, show start screen
-    if not qm.has_global_started(current_user.id):
+    # If the global test hasn't been started by admin, show waiting page
+    if not qm.is_global_started():
         return render_template('start_test.html', username=current_user.id)
 
     questions = list(qm.timers.keys())
@@ -182,23 +178,16 @@ def dashboard():
                          username=current_user.id, 
                          questions=questions,
                          submitted=submitted,
-                         current_question=current_question)
+                         current_question=current_question,
+                         time_left=qm.get_global_time_left())
 
 # Add route for start test
-@app.route('/start_test', methods=['GET', 'POST'])
+@app.route('/start_test', methods=['GET'])
 @login_required
 def start_test():
     if current_user.is_admin:
         return redirect(url_for('admin_dashboard'))
-    if request.method == 'POST':
-        # Start the single global timer for this user
-        try:
-            qm.start_global_timer(current_user.id)
-        except Exception:
-            app.logger.exception('Failed to start global timer')
-        # Redirect to first question
-        first_q = list(qm.timers.keys())[0]
-        return redirect(url_for('question', qname=first_q))
+    # Student start page now shows waiting for admin to start the global test
     return render_template('start_test.html', username=current_user.id)
 
 # Update review route
@@ -221,11 +210,9 @@ def review():
                 WHERE username=? AND question=?
             """, (current_user.id, qname))
             row = c.fetchone()
-            file_exists = os.path.exists(os.path.join(SUBMISSIONS_DIR, current_user.id, f"{qname}.py"))
-            
             submissions[qname] = {
                 'name': qname,
-                'submitted': bool(row and row[0]) or file_exists,
+                'submitted': bool(row and row[0]),
                 'time': datetime.fromtimestamp(row[1]).strftime('%Y-%m-%d %H:%M:%S') if row and row[1] else None
             }
     
@@ -241,100 +228,20 @@ def question():
     if not qname:
         return redirect(url_for('dashboard'))
     
-    if request.method == 'POST':
-        # Server-side timer enforcement: compute current global time left
-        time_left = qm.get_global_time_left(current_user.id)
-
-        # Support auto-submit when timer expires (client may post auto_submit=1)
-        if request.form.get('auto_submit') == '1':
-            try:
-                # Only allow auto-submit if the server-side timer has expired
-                if time_left > 0:
-                    return ("Timer has not expired yet", 400)
-
-                # If there is no uploaded file, create an empty .py file for this user/question
-                user_dir = os.path.join(SUBMISSIONS_DIR, current_user.id)
-                os.makedirs(user_dir, exist_ok=True)
-                dest = os.path.join(user_dir, f"{qname}.py")
-                # Create an empty file only if it doesn't already exist
-                if not os.path.exists(dest):
-                    with open(dest, 'w', encoding='utf-8') as f:
-                        f.write('# auto-submitted empty file\n')
-                # Save file but do not mark verified; require key verification to proceed
-                temp_path = dest
-                qm.save_submission_file(current_user.id, qname, temp_path)
-                # Redirect to key verification page so user must enter the key to complete
-                return redirect(url_for('key_verify', qname=qname))
-            except Exception:
-                log_error(traceback.format_exc())
-                return ("", 500)
-
-        # Normal uploaded-file handling
-        # Before accepting an uploaded answer ensure global timer still allows submissions
-        if time_left <= 0:
-            return render_template('question.html', qname=qname,
-                                error='Time has expired. You can no longer submit this question.',
-                                time_left=0,
-                                question_text=qm.get_question_text(qname))
-
-        if 'answer' not in request.files:
-            return render_template('question.html', qname=qname, 
-                                error='No file uploaded', 
-                                time_left=time_left,
-                                question_text=qm.get_question_text(qname))
-        
-        file = request.files['answer']
-        if file.filename == '':
-            return render_template('question.html', qname=qname, 
-                                error='No file selected', 
-                                time_left=qm.get_global_time_left(current_user.id),
-                                question_text=qm.get_question_text(qname))
-        
-        if file and allowed_file(file.filename):
-            try:
-                filename = secure_filename(file.filename)
-                temp_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-                file.save(temp_path)
-                # Final check: ensure time hasn't expired in the small gap while uploading
-                if qm.get_global_time_left(current_user.id) <= 0:
-                    # Clean up uploaded temp file
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-                    return render_template('question.html', qname=qname,
-                                        error='Time has expired during upload. Submission rejected.',
-                                        time_left=0,
-                                        question_text=qm.get_question_text(qname))
-                # Save file but don't mark verified yet; require key verification
-                qm.save_submission_file(current_user.id, qname, temp_path)
-                return redirect(url_for('key_verify', qname=qname))
-                    
-            except Exception as e:
-                error = str(e)
-                log_error(traceback.format_exc())
-                return render_template('question.html', qname=qname, 
-                                    error=error,
-                                    time_left=qm.get_time_left(current_user.id, qname),
-                                    question_text=qm.get_question_text(qname))
+    # No POST handling on question page anymore — key verification is done on /key-verify
     
     # GET request handling
-    # Ensure a server-side timer exists for this user/question. This will only
-    # create a start_time if one does not already exist (or is NULL). Calling
-    # this here makes the timer persistent across page reloads.
-    try:
-        qm.start_timer(current_user.id, qname)
-    except Exception:
-        # Don't block the user if there's a DB hiccup; logging will capture it.
-        app.logger.exception('Failed to start timer')
+    # If global timer expired, show out_of_time page
+    if qm.get_global_time_left() <= 0:
+        return render_template('out_of_time.html')
 
+    # Access control: only allow view if question not already submitted
     if not qm.can_access(current_user.id, qname):
         return redirect(url_for('review'))
 
     return render_template('question.html',
                          qname=qname,
-                         time_left=qm.get_time_left(current_user.id, qname),
+                         time_left=qm.get_global_time_left(),
                          question_text=qm.get_question_text(qname))
 
 @app.route('/logout', methods=['POST'])
@@ -389,7 +296,9 @@ def admin_dashboard():
                          system_status=system_status, 
                          errors=errors,
                          success_message=success_message,
-                         leave_counts=leave_counts)
+                         leave_counts=leave_counts,
+                         global_started=qm.is_global_started(),
+                         global_time_left=qm.get_global_time_left())
 
 
 @app.route('/key-verify', methods=['GET', 'POST'])
@@ -398,36 +307,51 @@ def key_verify():
     if current_user.is_admin:
         return redirect(url_for('admin_dashboard'))
 
-    qname = request.values.get('qname')
+    qname = request.args.get('qname')
     if not qname:
         return redirect(url_for('dashboard'))
 
-    # time left from global timer
-    time_left = qm.get_global_time_left(current_user.id)
+    # Ensure the user can still access (timer + not submitted)
+    if not qm.can_access(current_user.id, qname):
+        return redirect(url_for('review'))
 
+    error = None
     if request.method == 'POST':
-        key = request.form.get('key', '').strip()
-        if not key:
-            return render_template('key_verify.html', qname=qname, error='Please enter a key', time_left=time_left)
-
-        try:
-            if qm.verify_key(qname, key):
-                # Mark submission as verified (complete) and move to next
-                qm.mark_submission_verified(current_user.id, qname)
+        provided = request.form.get('key', '').strip()
+        expected = qm.get_expected_key(qname)
+        if expected is None:
+            error = 'No expected key found for this mission. Contact admin.'
+        else:
+            # Normalize both for comparison
+            if provided.lower() == expected.lower():
+                # Mark as submitted and move to next question
+                try:
+                    qm.mark_submitted(current_user.id, qname)
+                except Exception:
+                    app.logger.exception('Failed to mark key-verified submission')
                 questions = list(qm.timers.keys())
                 current_idx = questions.index(qname)
                 next_question = questions[current_idx + 1] if current_idx < len(questions) - 1 else None
-                if next_question:
-                    return redirect(url_for('question', qname=next_question))
+                # If completed all before time ends -> success
+                if not next_question:
+                    # If global time still left, show success, else out of time
+                    if qm.get_global_time_left() > 0:
+                        return render_template('success.html')
+                    else:
+                        return render_template('out_of_time.html')
                 else:
-                    return redirect(url_for('review'))
+                    return redirect(url_for('question', qname=next_question))
             else:
-                return render_template('key_verify.html', qname=qname, error='Incorrect key. Try again.', time_left=time_left)
-        except Exception:
-            log_error(traceback.format_exc())
-            return render_template('key_verify.html', qname=qname, error='Verification failed. Try again later.', time_left=time_left)
+                # Redirect to LOST page with retry
+                retry_url = url_for('question', qname=qname)
+                return render_template('lost.html', retry_url=retry_url)
 
-    return render_template('key_verify.html', qname=qname, time_left=time_left)
+    return render_template('key_verify.html', qname=qname, time_left=qm.get_time_left(current_user.id, qname), question_text=qm.get_question_text(qname), error=error)
+
+
+@app.route('/out_of_time')
+def out_of_time():
+    return render_template('out_of_time.html')
 
 
 @app.route('/admin/stats')
@@ -443,6 +367,22 @@ def admin_stats():
     except Exception as e:
         log_error(f"admin_stats error: {e}")
         return ({}, 500)
+
+
+@app.route('/admin/start_test', methods=['POST'])
+@login_required
+def admin_start_test():
+    if not current_user.is_admin:
+        return ("", 403)
+    try:
+        # Start global test with default duration
+        qm.start_global_test()
+        session['success_message'] = 'Global test started.'
+        return redirect(url_for('admin_dashboard'))
+    except Exception:
+        app.logger.exception('Failed to start global test')
+        session['success_message'] = 'Failed to start global test.'
+        return redirect(url_for('admin_dashboard'))
 
 
 # Endpoint for students to report they left/blurred the page
@@ -470,11 +410,8 @@ def admin_logout():
 def admin_download(username, qname):
     if not current_user.is_admin:
         return redirect(url_for('dashboard'))
-    user_dir = os.path.join(SUBMISSIONS_DIR, username)
-    filename = f"{qname}.py"
-    if os.path.exists(os.path.join(user_dir, filename)):
-        return send_from_directory(user_dir, filename, as_attachment=True)
-    return "File not found", 404
+    # File downloads are not supported; progress is DB-only
+    return "File downloads disabled. Progress is tracked in the database.", 404
 
 # Change the route from '/admin/reset' to '/reset-database'
 @app.route('/admin/reset', methods=['POST'])  # Changed from reset-database
@@ -484,16 +421,12 @@ def reset_database():
         return redirect(url_for('dashboard'))
     
     try:
-        # Delete all submission files
-        import shutil
-        if os.path.exists(SUBMISSIONS_DIR):
-            shutil.rmtree(SUBMISSIONS_DIR)
-            os.makedirs(SUBMISSIONS_DIR)
-            
-        # Reset database
+        # Reset database entries related to progress and global test
         with sqlite3.connect(DB_PATH) as conn:
             c = conn.cursor()
             c.execute("DELETE FROM submissions")
+            c.execute("DELETE FROM global_test WHERE id=1")
+            c.execute("DELETE FROM test_sessions")
             conn.commit()
             
         # Clear error logs

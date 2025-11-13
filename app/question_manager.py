@@ -26,7 +26,7 @@ class QuestionManager:
             "question4": 900,  # 15 min
             "question5": 600   # 10 min
         }
-        # Total test time: by default sum of per-question timers, can be overridden later
+        # Single overall test duration (sum of per-question defaults)
         self.total_time = sum(self.timers.values())
         self.load_logins()
         self._init_db()
@@ -51,50 +51,24 @@ class QuestionManager:
                 username TEXT PRIMARY KEY,
                 leave_count INTEGER DEFAULT 0
             )''')
-            # Table for global test sessions (single timer per user)
-            c.execute('''CREATE TABLE IF NOT EXISTS test_sessions (
-                username TEXT PRIMARY KEY,
-                start_time REAL
-            )''')
             # Add a column to store the last leave timestamp (to debounce rapid events)
             try:
                 c.execute("ALTER TABLE student_metrics ADD COLUMN last_leave_ts REAL DEFAULT 0")
             except Exception:
                 # SQLite will raise if the column already exists; ignore
                 pass
+            # Table to track when the student started the overall test session
+            c.execute('''CREATE TABLE IF NOT EXISTS test_sessions (
+                username TEXT PRIMARY KEY,
+                start_time REAL
+            )''')
+            # Global test control table (single row) for admin-started test
+            c.execute('''CREATE TABLE IF NOT EXISTS global_test (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                start_time REAL,
+                duration INTEGER
+            )''')
             conn.commit()
-
-    # --- Global timer/session methods ---
-    def start_global_timer(self, username):
-        """Start a single global timer for the user if not already started."""
-        import sqlite3, time
-        with self.lock, sqlite3.connect(self.db_path) as conn:
-            c = conn.cursor()
-            c.execute("SELECT start_time FROM test_sessions WHERE username = ?", (username,))
-            row = c.fetchone()
-            if not row:
-                c.execute("INSERT INTO test_sessions (username, start_time) VALUES (?, ?)", (username, time.time()))
-                conn.commit()
-
-    def has_global_started(self, username):
-        import sqlite3
-        with sqlite3.connect(self.db_path) as conn:
-            c = conn.cursor()
-            c.execute("SELECT start_time FROM test_sessions WHERE username = ?", (username,))
-            row = c.fetchone()
-            return bool(row and row[0])
-
-    def get_global_time_left(self, username):
-        import sqlite3, time
-        with sqlite3.connect(self.db_path) as conn:
-            c = conn.cursor()
-            c.execute("SELECT start_time FROM test_sessions WHERE username = ?", (username,))
-            row = c.fetchone()
-            if row and row[0]:
-                elapsed = time.time() - row[0]
-                left = self.total_time - elapsed
-                return max(0, int(left))
-            return int(self.total_time)
 
     def get_question_text(self, qname):
         qpath = os.path.join(self.questions_dir, f"{qname}.txt")
@@ -103,36 +77,67 @@ class QuestionManager:
                 return f.read()
         return None
 
-    def verify_key(self, qname, key):
-        """Verify the provided key string against the question's declared Answer: line.
-        Returns True/False. Comparison is case-insensitive and strips whitespace."""
-        text = self.get_question_text(qname)
-        if not text:
-            return False
-        for line in text.splitlines():
-            if line.strip().lower().startswith('answer:'):
-                expected = line.split(':', 1)[1].strip()
-                return expected.lower() == key.strip().lower()
-        return False
-
     def start_timer(self, username, qname):
-        # Deprecated per-question start - preserved for compatibility but not used when global timer is enabled
+        # Deprecated: per-question timers replaced by a single overall test timer.
+        # Keep the function for backward compatibility but do nothing.
+        return
+
+    def start_test(self, username):
+        """Start the overall test timer for `username`. Only sets once."""
+        # Deprecated: per-user start; kept for compatibility but forward to global start
+        return
+
+    # --- Global test control ---
+    def start_global_test(self, duration=None):
+        """Start the global test timer. duration in seconds. Writes a single-row global_test record."""
+        import sqlite3, time
+        if duration is None:
+            duration = int(self.total_time)
+        with self.lock, sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            # Insert or ignore if already started
+            c.execute("SELECT start_time FROM global_test WHERE id=1")
+            row = c.fetchone()
+            if not row:
+                c.execute("INSERT INTO global_test (id, start_time, duration) VALUES (1, ?, ?)", (time.time(), int(duration)))
+                conn.commit()
+
+    def reset_global_test(self):
+        import sqlite3
+        with self.lock, sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM global_test WHERE id=1")
+            conn.commit()
+
+    def get_time_left(self, username, qname):
+        # Return remaining time for the global test session
         import sqlite3, time
         with self.lock, sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
-            c.execute("SELECT start_time FROM submissions WHERE username=? AND question=?", (username, qname))
+            c.execute("SELECT start_time, duration FROM global_test WHERE id=1")
             row = c.fetchone()
-            if not row:
-                c.execute("INSERT INTO submissions (username, question, submitted, start_time) VALUES (?, ?, 0, ?)", (username, qname, 0, time.time()))
-                conn.commit()
+            if row and row[0] and row[1]:
+                start_ts, duration = row[0], row[1]
+                elapsed = time.time() - start_ts
+                left = int(duration - elapsed)
+                return max(0, left)
+            # If global test hasn't started, return full configured total_time
+            return int(self.total_time)
 
-    def get_time_left(self, username, qname):
-        # Deprecated: use global timer instead
-        return self.get_global_time_left(username)
+    def get_global_time_left(self):
+        """Return remaining seconds for the global timer (same as get_time_left but without username)."""
+        return self.get_time_left(None, None)
+
+    def is_global_started(self):
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT start_time FROM global_test WHERE id=1")
+            row = c.fetchone()
+            return bool(row and row[0])
 
     def can_access(self, username, qname):
-        # Access allowed only if global timer still has time and question not yet verified/submitted
-        left = self.get_global_time_left(username)
+        left = self.get_time_left(username, qname)
         import sqlite3
         with sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
@@ -145,49 +150,56 @@ class QuestionManager:
         import sqlite3
         with self.lock:
             try:
-                # Save submission file
-                user_dir = os.path.join(self.submissions_dir, username)
-                os.makedirs(user_dir, exist_ok=True)
-                dest = os.path.join(user_dir, f"{qname}.py")
-                os.replace(file_path, dest)
-                # For compatibility, mark as submitted (legacy). Prefer using save_submission_file + mark_submission_verified flow.
+                # Do not store files; only record submission in database
                 with sqlite3.connect(self.db_path) as conn:
                     c = conn.cursor()
-                    c.execute("INSERT OR REPLACE INTO submissions (username, question, submitted, start_time) VALUES (?, ?, 1, COALESCE((SELECT start_time FROM submissions WHERE username=? AND question=?), ?))",
-                              (username, qname, 1, username, qname, time.time()))
+                    c.execute("""
+                        INSERT OR REPLACE INTO submissions 
+                        (username, question, submitted, start_time)
+                        VALUES (?, ?, 1, COALESCE(
+                            (SELECT start_time FROM submissions WHERE username=? AND question=?),
+                            ?
+                        ))
+                    """, (username, qname, username, qname, time.time()))
                     conn.commit()
             except Exception as e:
                 logging.error(f"Error in submit_answer: {str(e)}")
                 raise
 
-    def save_submission_file(self, username, qname, file_path):
-        """Save the uploaded file to the user's submissions directory without marking the question as verified/submitted."""
-        with self.lock:
-            try:
-                user_dir = os.path.join(self.submissions_dir, username)
-                os.makedirs(user_dir, exist_ok=True)
-                dest = os.path.join(user_dir, f"{qname}.py")
-                os.replace(file_path, dest)
-            except Exception as e:
-                logging.error(f"Error in save_submission_file: {str(e)}")
-                raise
-
-    def mark_submission_verified(self, username, qname):
-        """Mark a saved submission as verified/submitted (used after key verification)."""
+    def mark_submitted(self, username, qname):
+        """Mark a question as submitted without uploading a file (used for key verification)."""
         import sqlite3, time
         with self.lock, sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
-            # Attempt to use the test_sessions start_time as the canonical start
-            c.execute("SELECT start_time FROM submissions WHERE username=? AND question=?", (username, qname))
-            existing = c.fetchone()
-            if existing and existing[0]:
-                start_ts = existing[0]
-            else:
-                c.execute("SELECT start_time FROM test_sessions WHERE username=?", (username,))
-                row = c.fetchone()
-                start_ts = row[0] if row and row[0] else time.time()
-            c.execute("INSERT OR REPLACE INTO submissions (username, question, submitted, start_time) VALUES (?, ?, 1, ?)", (username, qname, 1, start_ts))
+            # Preserve any existing start_time for the question if present
+            c.execute("""
+                INSERT OR REPLACE INTO submissions (username, question, submitted, start_time)
+                VALUES (?, ?, 1, COALESCE((SELECT start_time FROM submissions WHERE username=? AND question=?), ?))
+            """, (username, qname, username, qname, time.time()))
             conn.commit()
+
+    def has_started(self, username):
+        """Return True if the user has started the overall test session."""
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT start_time FROM test_sessions WHERE username=?", (username,))
+            row = c.fetchone()
+            return bool(row and row[0])
+
+    def get_expected_key(self, qname):
+        """Parse the question text file and try to extract the expected answer after 'Answer:'."""
+        qpath = os.path.join(self.questions_dir, f"{qname}.txt")
+        if not os.path.exists(qpath):
+            return None
+        with open(qpath, 'r', encoding='utf-8') as f:
+            text = f.read()
+        # Look for a line starting with 'Answer:' and return the rest
+        for line in text.splitlines():
+            if 'Answer:' in line:
+                # Extract everything after 'Answer:'
+                return line.split('Answer:', 1)[1].strip()
+        return None
 
     def has_submitted(self, username, qname):
         import sqlite3
@@ -223,13 +235,7 @@ class QuestionManager:
             for username, question, submitted in rows:
                 result[username][question] = bool(submitted)
                 
-            # Check file system for submissions as backup
-            for username in result.keys():
-                user_dir = os.path.join(self.submissions_dir, username)
-                if os.path.exists(user_dir):
-                    for qname in self.timers.keys():
-                        if os.path.exists(os.path.join(user_dir, f"{qname}.py")):
-                            result[username][qname] = True
+            # No file-system backup: rely solely on DB records
         
         return result
 
