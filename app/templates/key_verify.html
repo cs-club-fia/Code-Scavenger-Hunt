@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="glass">
+    <div class="header">Key Verification - {{ qname|capitalize }}</div>
+    <div class="status">Time left: <span id="timer">{{ time_left }}</span></div>
+    <div style="margin: 1rem 0; white-space: pre-wrap;">{{ question_text }}</div>
+
+    {% if error %}
+    <div style="color:#e74c3c; font-weight:bold; margin-bottom: 1rem;">{{ error }}</div>
+    {% endif %}
+
+    <form method="post">
+        <label for="key">Enter the mission key:</label><br>
+        <input type="text" name="key" id="key" required style="padding:0.5rem; width:100%; max-width:360px; margin:0.5rem 0;"><br>
+        <button type="submit" style="background:#27ae60;color:#fff;padding:0.5rem 1rem;border:none;border-radius:8px;">Verify Key</button>
+    </form>
+
+    <div style="margin-top:1rem;">
+        <a href="/question?qname={{ qname }}">Back to mission</a>
+    </div>
+</div>
+<script>
+    // simple display for seconds-only time_left
+    window.onload = function(){
+        var display = document.getElementById('timer');
+        // if time_left is numeric seconds, format as MM:SS
+        var t = parseInt(display.textContent);
+        if (!isNaN(t)){
+            var m = Math.floor(t/60);
+            var s = t%60;
+            display.textContent = m + ':' + (s<10? '0'+s : s);
+        }
+    };
+</script>
+{% endblock %}

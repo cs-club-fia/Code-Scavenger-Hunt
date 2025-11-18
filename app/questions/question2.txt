@@ -1,0 +1,26 @@
+Mission 2 - Ciphered Agent Files
+
+Story:
+Phantom left encrypted agent file names. Only by picking letters carefully will the next door unlock.
+
+Code:
+```python
+files = ["omega", "theta", "zeta", "kappa", "lambda"]
+
+key_sequence = []
+for f in files:
+	if len(f) % 2 == 0:
+		key_sequence.append(f[1].upper())
+	else:
+		key_sequence.append(f[-2].upper())
+
+print("".join(key_sequence))
+```
+
+Task:
+Trace the loop and conditionals to determine the printed string. This is the key for Mission 2.
+
+Answer: AETDL
+
+Spy-Themed Hint:
+"The Phantom likes to leave traps in file names. Even-numbered files reveal their first letter, odd-numbered files their second-to-last. Only by picking the correct letters will the next door unlock."

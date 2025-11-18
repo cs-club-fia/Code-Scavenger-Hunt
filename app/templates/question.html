@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="glass">
+    <div class="header">{{ qname|capitalize }}</div>
+    <div class="status">Time left: <span id="timer">{{ time_left }}</span></div>
+    <pre style="background: rgba(255,255,255,0.1); padding: 1rem; border-radius: 8px; overflow-x: auto; font-family: monospace; white-space: pre-wrap; word-wrap: break-word;">{{ question_text }}</pre>
+    
+    <button id="hintBtn" style="background: #3498db; color: white; margin-top: 1rem; padding: 0.8rem; border-radius: 8px; border: 1px solid #3498db; cursor: pointer; font-weight: bold;">Show Hint</button>
+    
+    {% if error %}<div class="status" style="background: #e74c3c; color: white;">{{ error }}</div>{% endif %}
+    
+    <form method="post" style="margin-top: 1rem;">
+        <input type="text" name="key" placeholder="Enter Mission Key" required style="padding: 0.8rem; font-size: 1rem;">
+        <button type="submit" style="background: #27ae60; color: white; margin-top: 0.5rem;">Submit Key</button>
+    </form>
+    
+    <!-- Hint Modal -->
+    <div id="hintModal" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;">
+        <div style="background:rgba(0,0,0,0.9);border-radius:16px;padding:2rem;box-shadow:0 4px 32px rgba(52,152,219,0.5);max-width:500px;margin:auto;text-align:center;border:2px solid #3498db;">
+            <h3 style="color:#3498db;margin-top:0;">Spy-Themed Hint</h3>
+            <p style="color:#ffffff;font-size:1rem;line-height:1.6;margin:1.5rem 0;">{{ hint }}</p>
+            <button id="hintOkBtn" style="background:#3498db;color:white;padding:0.8rem 2rem;border-radius:8px;border:none;cursor:pointer;font-weight:bold;font-size:1rem;">OK</button>
+        </div>
+    </div>
+    
+    <!-- File Missing Modal -->
+    <!-- Key verification flow — uploads deprecated -->
+</div>
+<script>
+    // Hint button functionality
+    document.getElementById('hintBtn').onclick = function() {
+        document.getElementById('hintModal').style.display = 'flex';
+    };
+
+    document.getElementById('hintOkBtn').onclick = function() {
+        document.getElementById('hintModal').style.display = 'none';
+    };
+
+    // Close modal when clicking outside
+    window.onclick = function(event) {
+        var modal = document.getElementById('hintModal');
+        if (event.target == modal) {
+            modal.style.display = 'none';
+        }
+    };
+
+    window.onload = function() {
+        var duration = {{ time_left }};
+        var display = document.getElementById('timer');
+        startTimer(duration, display, function(){
+            display.style.background = '#fffbe6';
+        }, function(){
+            // global timeout callback: navigate to out_of_time
+            window.location.href = '/out_of_time';
+        });
+    };
+
+    // No fullscreen functionality: removed per request.
+</script>
+{% endblock %}
