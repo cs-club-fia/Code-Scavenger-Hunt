@@ -228,7 +228,40 @@ def question():
     if not qname:
         return redirect(url_for('dashboard'))
     
-    # No POST handling on question page anymore — key verification is done on /key-verify
+    # POST handling: accept 'key' from the inline form on the question page
+    if request.method == 'POST':
+        # If global timer expired, show out_of_time
+        if qm.get_global_time_left() <= 0:
+            return render_template('out_of_time.html')
+
+        provided = request.form.get('key', '').strip()
+        if not provided:
+            return render_template('question.html', qname=qname, time_left=qm.get_global_time_left(), question_text=qm.get_question_text(qname), error='Please provide a key.')
+
+        expected = qm.get_expected_key(qname)
+        if expected is None:
+            return render_template('question.html', qname=qname, time_left=qm.get_global_time_left(), question_text=qm.get_question_text(qname), error='No expected key configured for this mission.')
+
+        if provided.lower() == expected.lower():
+            try:
+                qm.mark_submitted(current_user.id, qname)
+            except Exception:
+                app.logger.exception('Failed to mark key-verified submission')
+
+            questions = list(qm.timers.keys())
+            current_idx = questions.index(qname)
+            next_question = questions[current_idx + 1] if current_idx < len(questions) - 1 else None
+            # Completed all missions
+            if not next_question:
+                if qm.get_global_time_left() > 0:
+                    return render_template('success.html')
+                else:
+                    return render_template('out_of_time.html')
+            return redirect(url_for('question', qname=next_question))
+        else:
+            # Incorrect key -> show LOST screen with retry
+            retry_url = url_for('question', qname=qname)
+            return render_template('lost.html', retry_url=retry_url)
     
     # GET request handling
     # If global timer expired, show out_of_time page
