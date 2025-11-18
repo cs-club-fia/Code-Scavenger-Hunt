@@ -1,9 +1,0 @@
-{
-    "students": [
-        {"username": "student1", "password": "pass1"},
-        {"username": "student2", "password": "pass2"}
-    ],
-    "admins": [
-        {"username": "admin", "password": "adminpass"}
-    ]
-}
