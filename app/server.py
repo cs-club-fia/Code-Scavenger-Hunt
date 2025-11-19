@@ -136,6 +136,9 @@ def login():
         password = request.form['password']
         for s in qm.logins['students']:
             if s['username'] == username and s['password'] == password:
+                # Check if student is locked out
+                if qm.is_locked_out(username):
+                    return render_template('locked.html')
                 login_user(User(username))
                 return redirect(url_for('dashboard'))
         for a in qm.logins['admins']:
@@ -259,9 +262,16 @@ def question():
                     return render_template('out_of_time.html')
             return redirect(url_for('question', qname=next_question))
         else:
-            # Incorrect key -> show LOST screen with retry
+            # Incorrect key -> increment attempt count
+            attempt_count = qm.increment_attempt_count(current_user.id, qname)
+            
+            # If 3rd failed attempt, lock out the student and show locked page
+            if attempt_count >= 3:
+                return render_template('locked.html')
+            
+            # Otherwise show LOST screen with retry
             retry_url = url_for('question', qname=qname)
-            return render_template('lost.html', retry_url=retry_url)
+            return render_template('lost.html', retry_url=retry_url, attempt_count=attempt_count)
     
     # GET request handling
     # If global timer expired, show out_of_time page
@@ -315,6 +325,7 @@ def admin_dashboard():
     
     submissions = qm.get_all_submissions()
     leave_counts = qm.get_leave_counts()
+    attempt_counts = qm.get_all_attempt_counts()
     # Count users with any timer started
     import sqlite3
     with sqlite3.connect(DB_PATH) as conn:
@@ -330,9 +341,11 @@ def admin_dashboard():
                          system_status=system_status, 
                          errors=errors,
                          success_message=success_message,
+                         attempt_counts=attempt_counts,
                          leave_counts=leave_counts,
                          global_started=qm.is_global_started(),
-                         global_time_left=qm.get_global_time_left())
+                         global_time_left=qm.get_global_time_left(),
+                         lockout_status=qm.get_all_lockout_status())
 
 
 @app.route('/out_of_time')
@@ -439,6 +452,21 @@ def reset_database():
         
     except Exception as e:
         log_error(f"Database reset failed: {str(e)}\n{traceback.format_exc()}")
+        return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/unlock/<username>', methods=['POST'])
+@login_required
+def unlock_student(username):
+    if not current_user.is_admin:
+        return ("", 403)
+    
+    try:
+        qm.unlock_student(username)
+        session['success_message'] = f"Student '{username}' has been unlocked and their attempt counts have been reset."
+        return redirect(url_for('admin_dashboard'))
+    except Exception as e:
+        log_error(f"Failed to unlock student {username}: {str(e)}")
+        session['success_message'] = f"Failed to unlock student '{username}'."
         return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/logs', methods=['GET'])

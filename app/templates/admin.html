@@ -19,11 +19,13 @@
         <tr>
             <th data-sort="string">User</th>
             {% for q in questions %}<th data-sort="string">{{ q|capitalize }}</th>{% endfor %}
+            <th data-sort="string">Status</th>
+            <th>Action</th>
         </tr>
         </thead>
         <tbody>
         {% for user, subs in submissions.items() %}
-        <tr>
+        <tr {% if lockout_status[user] %}style="background:rgba(231,76,60,0.1);"{% endif %}>
             <td>{{ user }}</td>
             {% for q in questions %}
             <td>
@@ -32,8 +34,25 @@
                 {% else %}
                     <span style="color:#e74c3c;">✖</span>
                 {% endif %}
+                {% if attempt_counts[user][q] > 0 %}
+                <br><span style="font-size:0.8rem;color:#f39c12;">({{ attempt_counts[user][q] }}/3)</span>
+                {% endif %}
             </td>
             {% endfor %}
+            <td>
+                {% if lockout_status[user] %}
+                    <span style="color:#e74c3c;font-weight:bold;">🔒 LOCKED</span>
+                {% else %}
+                    <span style="color:#27ae60;">Active</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if lockout_status[user] %}
+                    <form method="post" action="{{ url_for('unlock_student', username=user) }}" style="display:inline;">
+                        <button type="submit" style="background:#27ae60;color:white;padding:0.3rem 0.6rem;font-size:0.85rem;border:none;border-radius:4px;cursor:pointer;">Unlock</button>
+                    </form>
+                {% endif %}
+            </td>
         </tr>
         {% endfor %}
         </tbody>

@@ -65,18 +65,32 @@ class QuestionManager:
                 question TEXT,
                 submitted INTEGER,
                 start_time REAL,
+                attempt_count INTEGER DEFAULT 0,
                 PRIMARY KEY (username, question)
             )''')
-            # Table for student metrics such as leave counts
+            # Add attempt_count column if it doesn't exist
+            try:
+                c.execute("ALTER TABLE submissions ADD COLUMN attempt_count INTEGER DEFAULT 0")
+            except Exception:
+                # Column already exists
+                pass
+            # Table for student metrics such as leave counts and lockout status
             c.execute('''CREATE TABLE IF NOT EXISTS student_metrics (
                 username TEXT PRIMARY KEY,
-                leave_count INTEGER DEFAULT 0
+                leave_count INTEGER DEFAULT 0,
+                locked_out INTEGER DEFAULT 0
             )''')
             # Add a column to store the last leave timestamp (to debounce rapid events)
             try:
                 c.execute("ALTER TABLE student_metrics ADD COLUMN last_leave_ts REAL DEFAULT 0")
             except Exception:
                 # SQLite will raise if the column already exists; ignore
+                pass
+            # Add locked_out column if it doesn't exist
+            try:
+                c.execute("ALTER TABLE student_metrics ADD COLUMN locked_out INTEGER DEFAULT 0")
+            except Exception:
+                # Column already exists
                 pass
             # Table to track when the student started the overall test session
             c.execute('''CREATE TABLE IF NOT EXISTS test_sessions (
@@ -303,7 +317,121 @@ class QuestionManager:
 
         return result
 
+    # --- Lockout and Retry Tracking ---
+    def increment_attempt_count(self, username, qname):
+        """Increment the attempt count for a question. If it reaches 3, lock out the student."""
+        import sqlite3
+        with self.lock, sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            # Ensure row exists
+            c.execute("INSERT OR IGNORE INTO submissions (username, question, submitted, attempt_count, start_time) VALUES (?, ?, 0, 0, ?)", 
+                     (username, qname, time.time()))
+            # Increment attempt count
+            c.execute("UPDATE submissions SET attempt_count = attempt_count + 1 WHERE username = ? AND question = ?", 
+                     (username, qname))
+            # Check new count
+            c.execute("SELECT attempt_count FROM submissions WHERE username = ? AND question = ?", 
+                     (username, qname))
+            row = c.fetchone()
+            attempt_count = row[0] if row else 0
+            
+            # If 3 failed attempts, lock out the student
+            if attempt_count >= 3:
+                c.execute("INSERT OR IGNORE INTO student_metrics (username, locked_out) VALUES (?, 1)", (username,))
+                c.execute("UPDATE student_metrics SET locked_out = 1 WHERE username = ?", (username,))
+            
+            conn.commit()
+            return attempt_count
+
+    def get_attempt_count(self, username, qname):
+        """Get the current attempt count for a question."""
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT attempt_count FROM submissions WHERE username = ? AND question = ?", 
+                     (username, qname))
+            row = c.fetchone()
+            return row[0] if row else 0
+
+    def is_locked_out(self, username):
+        """Check if a student is locked out (has reached 3 failed attempts on any question)."""
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT locked_out FROM student_metrics WHERE username = ?", (username,))
+            row = c.fetchone()
+            return bool(row and row[0])
+
+    def lock_out_student(self, username):
+        """Lock out a student from the system."""
+        import sqlite3
+        with self.lock, sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO student_metrics (username, locked_out) VALUES (?, 1)", (username,))
+            c.execute("UPDATE student_metrics SET locked_out = 1 WHERE username = ?", (username,))
+            conn.commit()
+
+    def unlock_student(self, username):
+        """Unlock a student (admin reset)."""
+        import sqlite3
+        with self.lock, sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("UPDATE student_metrics SET locked_out = 0 WHERE username = ?", (username,))
+            # Also reset attempt counts for all questions
+            c.execute("UPDATE submissions SET attempt_count = 0 WHERE username = ?", (username,))
+            conn.commit()
+
+    def get_all_lockout_status(self):
+        """Get lockout status for all students."""
+        import sqlite3
+        result = {}
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT username, locked_out FROM student_metrics WHERE locked_out = 1")
+            rows = c.fetchall()
+            for username, locked_out in rows:
+                result[username] = bool(locked_out)
+        
+        # Ensure all students are present
+        try:
+            students = [s['username'] for s in self.logins.get('students', [])]
+        except Exception:
+            students = []
+        for s in students:
+            result.setdefault(s, False)
+        
+        return result
+
+    def get_all_attempt_counts(self):
+        """Get all attempt counts organized by username and question."""
+        import sqlite3
+        result = {}
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT username, question, attempt_count FROM submissions")
+            rows = c.fetchall()
+            for username, question, attempt_count in rows:
+                if username not in result:
+                    result[username] = {}
+                result[username][question] = attempt_count
+        
+        # Ensure all students are present with all questions initialized to 0
+        try:
+            students = [s['username'] for s in self.logins.get('students', [])]
+        except Exception:
+            students = []
+        
+        for s in students:
+            if s not in result:
+                result[s] = {}
+            for q in self.timers.keys():
+                result[s].setdefault(q, 0)
+        
+        return result
+
 # Usage example:
 # qm = QuestionManager('app/questions', 'app/submissions', 'app/logins.json')
 # qm.start_timer('student1', 'question1')
 # print(qm.get_time_left('student1', 'question1'))
+
+
